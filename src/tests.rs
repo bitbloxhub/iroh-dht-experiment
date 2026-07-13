@@ -8,7 +8,7 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, SecretKey, discovery::static_provider::StaticProvider, endpoint::BindError,
+    Endpoint, SecretKey, address_lookup::memory::MemoryLookup, endpoint::BindError,
     protocol::Router,
 };
 use iroh_blobs::util::connection_pool::ConnectionPool;
@@ -537,7 +537,7 @@ async fn iroh_create_nodes(
     let node_ids = secrets.iter().map(|s| s.public()).collect::<Vec<_>>();
     let node_ids = Arc::new(node_ids);
     let buckets = Arc::new(buckets);
-    let discovery = StaticProvider::new();
+    let discovery = MemoryLookup::new();
     n_bootstrap = n_bootstrap.min(n - 1);
     // create n nodes
     stream::iter(secrets.iter().zip(node_ids.iter()).enumerate())
@@ -546,14 +546,14 @@ async fn iroh_create_nodes(
             let node_ids = node_ids.clone();
             let discovery = discovery.clone();
             async move {
-                let endpoint = Endpoint::builder()
+                let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
                     .secret_key(secret.clone())
                     .relay_mode(iroh::RelayMode::Disabled)
-                    .discovery(discovery.clone())
+                    .address_lookup(discovery.clone())
                     .bind()
                     .await?;
-                let addr = endpoint.node_addr();
-                discovery.add_node_info(addr.clone());
+                let addr = endpoint.addr();
+                discovery.add_endpoint_info(addr.clone());
                 let pool = ConnectionPool::new(
                     endpoint.clone(),
                     DHT_TEST_ALPN,
@@ -564,7 +564,7 @@ async fn iroh_create_nodes(
                         on_connected: None,
                     },
                 );
-                let pool = IrohPool::new(endpoint.clone(), pool);
+                let pool = IrohPool::new(endpoint.clone(), pool, discovery.clone());
                 let bootstrap = (0..n_bootstrap)
                     .map(|i| node_ids[(offfset + i + 1) % n])
                     .collect::<Vec<_>>();
@@ -621,7 +621,7 @@ async fn iroh_perfect_routing_tables(prefix: &str, n: usize) -> TestResult<()> {
     let iroh_nodes = iroh_create_nodes(&secrets, bootstrap, None).await?;
     let nodes = iroh_nodes
         .iter()
-        .map(|(ep, x)| (ep.node_id(), x.clone()))
+        .map(|(ep, x)| (ep.id(), x.clone()))
         .collect::<Vec<_>>();
     let ids = nodes.iter().map(|(id, _)| *id).collect::<Vec<_>>();
     println!("Initializing routing tables");

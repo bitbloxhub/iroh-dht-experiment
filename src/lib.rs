@@ -75,7 +75,7 @@ use std::{
 
 use futures_buffered::FuturesUnordered;
 use indexmap::IndexSet;
-use iroh::NodeId;
+use iroh::EndpointId as NodeId;
 use irpc::{
     LocalSender,
     channel::{mpsc, oneshot},
@@ -105,8 +105,8 @@ pub mod rpc {
         sync::{Arc, Weak},
     };
 
-    use iroh::{Endpoint, NodeAddr, NodeId, PublicKey};
-    use iroh_base::SignatureError;
+    use iroh::{Endpoint, EndpointAddr as NodeAddr, EndpointId as NodeId, PublicKey};
+    use iroh_base::KeyParsingError;
     use irpc::{
         channel::{mpsc, oneshot},
         rpc_requests,
@@ -229,7 +229,7 @@ pub mod rpc {
             Id(hash.into())
         }
 
-        pub fn node_id(id: iroh::NodeId) -> Self {
+        pub fn node_id(id: iroh::EndpointId) -> Self {
             Id::from(*id.as_bytes())
         }
     }
@@ -324,8 +324,8 @@ pub mod rpc {
     }
 
     impl RpcClient {
-        pub fn remote(endpoint: Endpoint, id: Id) -> std::result::Result<Self, SignatureError> {
-            let id = iroh::NodeId::from_bytes(&id)?;
+        pub fn remote(endpoint: Endpoint, id: Id) -> std::result::Result<Self, KeyParsingError> {
+            let id = iroh::EndpointId::from_bytes(&id)?;
             let client = irpc_iroh::client(endpoint, id, ALPN);
             Ok(Self::new(client))
         }
@@ -380,7 +380,7 @@ pub mod api {
         time::Duration,
     };
 
-    use iroh::NodeId;
+    use iroh::EndpointId as NodeId;
     use irpc::{
         channel::{mpsc, none::NoSender, oneshot},
         rpc_requests,
@@ -569,7 +569,12 @@ pub mod api {
             self.0
                 .upgrade()
                 .map(ApiClient)
-                .ok_or(irpc::Error::Send(irpc::channel::SendError::ReceiverClosed))
+                .ok_or_else(|| {
+                    irpc::channel::SendError::ReceiverClosed {
+                        meta: Default::default(),
+                    }
+                    .into()
+                })
         }
 
         pub async fn nodes_dead(&self, ids: &[NodeId]) -> irpc::Result<()> {
@@ -621,7 +626,7 @@ mod routing {
     };
 
     use arrayvec::ArrayVec;
-    use iroh::NodeId;
+    use iroh::EndpointId as NodeId;
 
     use super::rpc::Id;
 
@@ -1083,7 +1088,8 @@ pub mod pool {
     use std::sync::{Arc, RwLock};
 
     use iroh::{
-        Endpoint, NodeAddr, NodeId,
+        Endpoint, EndpointAddr as NodeAddr, EndpointId as NodeId,
+        address_lookup::memory::MemoryLookup,
         endpoint::{RecvStream, SendStream},
     };
     use iroh_blobs::util::connection_pool::{ConnectionPool, ConnectionRef};
@@ -1131,14 +1137,16 @@ pub mod pool {
     pub struct IrohPool {
         endpoint: Endpoint,
         inner: ConnectionPool,
+        address_lookup: MemoryLookup,
         self_client: Arc<RwLock<Option<WeakRpcClient>>>,
     }
 
     impl IrohPool {
-        pub fn new(endpoint: Endpoint, inner: ConnectionPool) -> Self {
+        pub fn new(endpoint: Endpoint, inner: ConnectionPool, address_lookup: MemoryLookup) -> Self {
             Self {
                 endpoint,
                 inner,
+                address_lookup,
                 self_client: Arc::new(RwLock::new(None)),
             }
         }
@@ -1175,11 +1183,16 @@ pub mod pool {
                 Ok((send, recv))
             })
         }
+
+        fn zero_rtt_rejected(&self) -> n0_future::future::Boxed<bool> {
+            // Connections handed out by the pool are fully established, not 0-RTT.
+            Box::pin(async { false })
+        }
     }
 
     impl ClientPool for IrohPool {
         fn id(&self) -> NodeId {
-            self.endpoint.node_id()
+            self.endpoint.id()
         }
 
         fn node_addr(&self, node_id: NodeId) -> NodeAddr {
@@ -1193,15 +1206,16 @@ pub mod pool {
         fn add_node_addr(&self, addr: NodeAddr) {
             // don't add self info.
             // this should not happen, but just in case
-            if addr.node_id == self.id() {
+            if addr.id == self.id() {
                 return;
             }
             // don't add useless info.
-            if addr.relay_url.is_none() && addr.direct_addresses.is_empty() {
+            if addr.is_empty() {
                 return;
             }
-            // this can still fail, for the reason AddNodeAddrError::EmptyPruned ¯\_(ツ)_/¯
-            self.endpoint.add_node_addr_with_source(addr, "").ok();
+            // Feed the addressing info into the memory address lookup so the
+            // endpoint can dial this node by id.
+            self.address_lookup.add_endpoint_info(addr);
         }
 
         async fn client(&self, node_id: NodeId) -> Result<RpcClient, String> {
@@ -1793,7 +1807,7 @@ impl<P: ClientPool> State<P> {
         }
         let infos = infos?;
         drop(client);
-        let ids = infos.iter().map(|info| info.node_id).collect();
+        let ids = infos.iter().map(|info| info.id).collect();
         for info in infos {
             self.pool.add_node_addr(info);
         }
