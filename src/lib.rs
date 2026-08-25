@@ -1017,6 +1017,9 @@ mod u256 {
         type Output = Self;
 
         fn shl(self, rhs: u32) -> Self::Output {
+            if rhs == 0 {
+                return self;
+            }
             if rhs >= 256 {
                 return U256::MIN;
             }
@@ -1050,6 +1053,9 @@ mod u256 {
         type Output = Self;
 
         fn shr(self, rhs: u32) -> Self::Output {
+            if rhs == 0 {
+                return self;
+            }
             if rhs >= 256 {
                 return U256::MIN;
             }

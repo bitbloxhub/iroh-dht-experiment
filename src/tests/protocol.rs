@@ -95,6 +95,21 @@ fn full_bucket_drops_newcomers() {
     assert_eq!(rt.nodes().count(), size);
 }
 
+#[test]
+fn u256_shift_by_zero_is_identity() {
+    let x = crate::u256::U256::from_le_bytes([0x5au8; 32]);
+    assert_eq!(x << 0, x);
+    assert_eq!(x >> 0, x);
+}
+
+#[test]
+fn blend_zero_is_left_operand() {
+    let a = crate::u256::U256::from_le_bytes([1u8; 32]);
+    let b = crate::u256::U256::from_le_bytes([2u8; 32]);
+    assert_eq!(crate::blend(a, b, 0), a);
+    assert_eq!(crate::blend(a, b, 256), b);
+}
+
 #[tokio::test]
 async fn nodes_seen_and_dead_update_routing_table() {
     let ids = create_node_ids(&create_secrets(0, 3));
