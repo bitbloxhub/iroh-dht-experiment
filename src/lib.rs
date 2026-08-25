@@ -1665,9 +1665,9 @@ where
                 // if we know k nodes that are closer to the key than we are, we don't want to store
                 // the data!
                 if ids.len() >= self.state.config.k
-                    && ids.iter().all(|id| {
-                        Distance::between(self.node.id().as_bytes(), id.as_bytes()) < self_dist
-                    })
+                    && ids
+                        .iter()
+                        .all(|id| Distance::between(id.as_bytes(), &msg.key) < self_dist)
                 {
                     msg.tx.send(SetResponse::ErrDistance).await.ok();
                     return;

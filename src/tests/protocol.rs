@@ -12,7 +12,7 @@ use testresult::TestResult;
 use super::*;
 use crate::{
     routing::{K, RoutingTable},
-    rpc::{Blake3Immutable, Kind, Value},
+    rpc::{Blake3Immutable, Kind, SetResponse, Value},
 };
 
 const TINY: usize = 24;
@@ -136,6 +136,32 @@ async fn lookup_with_full_tables_returns_k_closest() {
     got.sort();
     expected.sort();
     assert_eq!(got, expected);
+}
+
+#[tokio::test]
+async fn set_rejects_when_k_closer_nodes_are_known() {
+    let (ids, nodes) = tiny_swarm(TINY).await;
+    let key = Id::blake3_hash(b"placement");
+    let closest = expected_ids(&ids, key, K);
+    let value = immutable(b"placement");
+
+    let close = closest[0];
+    let (close_rpc, _) = nodes.iter().find(|(id, _)| *id == close).unwrap().1.clone();
+    assert!(matches!(
+        close_rpc.set(key, value.clone()).await.unwrap(),
+        SetResponse::Ok
+    ));
+
+    let far = ids
+        .iter()
+        .copied()
+        .find(|id| !closest.contains(id))
+        .expect("tiny swarm should have nodes outside the k closest");
+    let (far_rpc, _) = nodes.iter().find(|(id, _)| *id == far).unwrap().1.clone();
+    assert!(matches!(
+        far_rpc.set(key, value).await.unwrap(),
+        SetResponse::ErrDistance
+    ));
 }
 
 #[tokio::test]
