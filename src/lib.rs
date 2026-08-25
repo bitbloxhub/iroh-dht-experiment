@@ -538,7 +538,7 @@ pub mod api {
                 match rx.recv().await {
                     Ok(Some(id)) => res.push(id),
                     Ok(None) => break,
-                    Err(_) => {}
+                    Err(_) => break,
                 }
             }
             Ok((hash, res))
