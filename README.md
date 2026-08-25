@@ -2,24 +2,49 @@
 
 ## Tests
 
-Most tests are not really tests but just print out some network stats for you
-to see if the result makes sense. So you need to run them with -- --nocapture
+```sh
+cargo test
+```
 
-### Memory tests
+These are small in-memory protocol tests (plus one tiny iroh swarm) with real
+assertions.
 
-- just_bootstrap_1k: network stats with just 20 bootstrap nodes per node perfect_routing_tables_1k
-- perfect_routing_tables_10k: init routing tables with all ids
-- no_routing_1k: shows perfect data distribution
-- self_and_random_lookup_strategy: self and random lookup combined, over time
-- self_lookup_strategy: self lookup strategy
-- random_lookup_strategy: random lookups, over time
-- remove_1k: disconnect 100 of 1000 nodes and see how routing tables change, gif
-- partition_1k: connect 100 of 1000 nodes and see how routing tables change, gif
-- random_vs_blended_1k: compares random vs blended strategy, gif
+## Visualizations
 
-### Iroh tests
+Swarm plots and gifs live in `src/tests/viz.rs`. They are ignored by default;
+they print stats and write files under `img/` rather than asserting DHT
+behaviour.
 
-iroh_perfect_routing_tables_500: creates 500 iroh nodes with perfect routing tables and stores some values
+```sh
+cargo test --lib viz -- --ignored --nocapture
+```
+
+Run a single scenario:
+
+```sh
+cargo test --lib viz::perfect_routing_tables_1k -- --ignored --nocapture
+```
+
+Scenarios:
+
+- just_bootstrap_1k
+- perfect_routing_tables_1k
+- perfect_routing_tables_10k
+- no_routing_1k
+- self_and_random_lookup_strategy
+- self_lookup_strategy
+- random_lookup_strategy
+- remove_1k
+- partition_1k
+- random_vs_blended_1k
+- iroh_perfect_routing_tables_500
+
+`--release` helps for the 1k-node runs. `perfect_routing_tables_100k` and
+`iroh_perfect_routing_tables_10k` are extra-heavy; skip them unless you mean it:
+
+```sh
+cargo test --lib viz -- --ignored --nocapture --skip 100k --skip 10k
+```
 
 ## License
 
