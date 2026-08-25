@@ -3,7 +3,7 @@
 //! These assert behaviour. Swarm plots live in [`super::viz`] and are ignored
 //! by default.
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use iroh::SecretKey;
 use rand::Rng;
@@ -192,6 +192,16 @@ async fn get_all_empty_key_ends_stream() {
     let key = Id::from([9u8; 32]);
     let got = collect_values(rpc, key, Kind::Blake3Immutable, None, Some(nz(1))).await;
     assert!(got.is_empty());
+}
+
+#[tokio::test]
+async fn candidate_lookup_without_strategy_does_not_hang() {
+    let ids = create_node_ids(&create_secrets(0, 1));
+    let nodes = create_nodes(&ids, next_n(0), Config::default()).await;
+    let (_, api) = &nodes[0].1;
+    tokio::time::timeout(Duration::from_secs(1), api.candidate_lookup())
+        .await
+        .expect("candidate_lookup hung (oneshot never completed)");
 }
 
 #[tokio::test(flavor = "multi_thread")]

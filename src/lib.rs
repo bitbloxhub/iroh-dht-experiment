@@ -1612,10 +1612,12 @@ where
                     warn!(
                         "Received CandidateLookup request, but no candidate lookup strategy is configured"
                     );
+                    msg.tx.send(()).await.ok();
                     return;
                 };
                 let Some(candidates) = self.candidates.as_mut() else {
                     warn!("Received CandidateLookup request, but no candidates are being tracked");
+                    msg.tx.send(()).await.ok();
                     return;
                 };
                 // use the most recent `max_lookups * k` candidates
