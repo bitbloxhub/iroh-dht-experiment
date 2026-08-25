@@ -1,5 +1,6 @@
 //! Test helpers shared by protocol tests and swarm visualizations.
 mod protocol;
+mod slow;
 mod viz;
 
 use std::sync::{Arc, Mutex};
@@ -19,10 +20,35 @@ use crate::pool::IrohPool;
 struct TestPool {
     clients: Arc<Mutex<BTreeMap<NodeId, RpcClient>>>,
     node_id: NodeId,
+    faults: NetFaults,
+}
+
+/// Per-node delay / hang injected by `TestPool::client`.
+#[derive(Clone, Debug, Default)]
+struct NetFaults {
+    delay: Arc<Mutex<BTreeMap<NodeId, Duration>>>,
+    hang: Arc<Mutex<HashSet<NodeId>>>,
+}
+
+impl NetFaults {
+    fn delay(&self, id: NodeId, delay: Duration) {
+        self.delay.lock().unwrap().insert(id, delay);
+    }
+
+    fn hang(&self, id: NodeId) {
+        self.hang.lock().unwrap().insert(id);
+    }
 }
 
 impl ClientPool for TestPool {
     async fn client(&self, id: NodeId) -> Result<RpcClient, String> {
+        if self.faults.hang.lock().unwrap().contains(&id) {
+            std::future::pending::<()>().await;
+        }
+        let delay = self.faults.delay.lock().unwrap().get(&id).copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let client = self
             .clients
             .lock()
@@ -92,8 +118,9 @@ async fn create_nodes_and_clients(
     ids: &[NodeId],
     select_bootstrap: impl Fn(usize) -> Vec<usize>,
     config: Config,
-) -> (Nodes, Clients) {
+) -> (Nodes, Clients, NetFaults) {
     let clients = Arc::new(Mutex::new(BTreeMap::new()));
+    let faults = NetFaults::default();
     let nodes = ids
         .iter()
         .enumerate()
@@ -101,6 +128,7 @@ async fn create_nodes_and_clients(
             let pool = TestPool {
                 clients: clients.clone(),
                 node_id: *id,
+                faults: faults.clone(),
             };
             let bootstrap = apply_selection(offset, ids, &select_bootstrap(offset));
             (
@@ -113,7 +141,7 @@ async fn create_nodes_and_clients(
         .lock()
         .unwrap()
         .extend(nodes.iter().map(|(id, (rpc, _))| (*id, rpc.clone())));
-    (nodes, clients)
+    (nodes, clients, faults)
 }
 
 /// Insert `ids` into every node's routing table. Full buckets still drop extras.

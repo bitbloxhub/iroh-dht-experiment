@@ -634,7 +634,7 @@ async fn partition_1k() -> TestResult<()> {
             max_lookups: 1,
             interval: Duration::from_secs(1),
         });
-    let (nodes, _clients) = create_nodes_and_clients(&ids, bootstrap, config).await;
+    let (nodes, _clients, _) = create_nodes_and_clients(&ids, bootstrap, config).await;
     let mut frames = Vec::new();
     for i in 0..10 {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -693,7 +693,7 @@ async fn remove_1k() -> TestResult<()> {
             max_lookups: 1,
             interval: Duration::from_secs(1),
         });
-    let (nodes, clients) = create_nodes_and_clients(&ids, next_n(20), config).await;
+    let (nodes, clients, _) = create_nodes_and_clients(&ids, next_n(20), config).await;
     let mut frames = Frames {
         data: Vec::new(),
         stride: n,

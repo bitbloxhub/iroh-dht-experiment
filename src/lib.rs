@@ -566,15 +566,12 @@ pub mod api {
 
     impl WeakApiClient {
         pub fn upgrade(&self) -> irpc::Result<ApiClient> {
-            self.0
-                .upgrade()
-                .map(ApiClient)
-                .ok_or_else(|| {
-                    irpc::channel::SendError::ReceiverClosed {
-                        meta: Default::default(),
-                    }
-                    .into()
-                })
+            self.0.upgrade().map(ApiClient).ok_or_else(|| {
+                irpc::channel::SendError::ReceiverClosed {
+                    meta: Default::default(),
+                }
+                .into()
+            })
         }
 
         pub async fn nodes_dead(&self, ids: &[NodeId]) -> irpc::Result<()> {
@@ -1148,7 +1145,11 @@ pub mod pool {
     }
 
     impl IrohPool {
-        pub fn new(endpoint: Endpoint, inner: ConnectionPool, address_lookup: MemoryLookup) -> Self {
+        pub fn new(
+            endpoint: Endpoint,
+            inner: ConnectionPool,
+            address_lookup: MemoryLookup,
+        ) -> Self {
             Self {
                 endpoint,
                 inner,
@@ -1318,6 +1319,9 @@ pub struct Config {
     /// Parallelism for the set or getall requests once we have found the k
     /// closest nodes.
     parallelism: usize,
+    /// Per-peer RPC timeout for iterative lookup. `None` waits indefinitely.
+    #[serde(default)]
+    query_timeout: Option<Duration>,
     /// Whether the requester is a transient node.
     transient: bool,
     /// Random number generator seed.
@@ -1424,6 +1428,11 @@ impl Config {
         self.lookup_strategies.self_id = Some(value);
         self
     }
+
+    pub fn query_timeout(mut self, timeout: Duration) -> Self {
+        self.query_timeout = Some(timeout);
+        self
+    }
 }
 
 impl Default for Config {
@@ -1432,6 +1441,7 @@ impl Default for Config {
             k: K,
             alpha: ALPHA,
             parallelism: 4,
+            query_timeout: None,
             transient: true,
             lookup_strategies: LookupStrategies {
                 random: None,
@@ -1810,21 +1820,36 @@ impl<P: ClientPool> State<P> {
             Some(self.pool.id())
         };
 
-        let client = self
-            .pool
-            .client(id)
-            .await
-            .map_err(|_| "Error getting client")?;
-        let infos = client
-            .find_node(target, requester)
-            .await
-            .map_err(|_| "Failed to query node");
-        if let Err(e) = &infos {
-            info!(%id, "Failed to query node: {e}");
-            return Err("Failed to query node");
-        }
-        let infos = infos?;
-        drop(client);
+        let fut = async {
+            let client = self
+                .pool
+                .client(id)
+                .await
+                .map_err(|_| "Error getting client")?;
+            let infos = client
+                .find_node(target, requester)
+                .await
+                .map_err(|_| "Failed to query node")?;
+            drop(client);
+            Ok(infos)
+        };
+
+        let infos = if let Some(timeout) = self.config.query_timeout {
+            tokio::time::timeout(timeout, fut)
+                .await
+                .map_err(|_| "Query timed out")?
+        } else {
+            fut.await
+        };
+
+        let infos = match infos {
+            Ok(infos) => infos,
+            Err(e) => {
+                info!(%id, "Failed to query node: {e}");
+                return Err(e);
+            }
+        };
+
         let ids = infos.iter().map(|info| info.id).collect();
         for info in infos {
             self.pool.add_node_addr(info);
