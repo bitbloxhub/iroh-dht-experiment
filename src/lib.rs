@@ -1758,7 +1758,7 @@ impl<P: ClientPool> State<P> {
                     let Ok(client) = pool.client(id).await else {
                         return;
                     };
-                    if client.set(msg.id, value).await.is_ok() {
+                    if let Ok(SetResponse::Ok) = client.set(msg.id, value).await {
                         tx.send(id).await.ok();
                     }
                     drop(client);
