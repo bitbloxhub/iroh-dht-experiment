@@ -1581,9 +1581,14 @@ where
                 });
             }
             ApiMessage::RandomLookup(msg) => {
-                // bucket up to which the node should overlap with self.
-                // 0 is fully random, 256 is just self.
-                let blended = false;
+                // `blend(n)`: n=0 is self, n>=256 is fully random.
+                let blended = self
+                    .state
+                    .config
+                    .lookup_strategies
+                    .random
+                    .as_ref()
+                    .is_some_and(|s| s.blended);
                 let id = if blended {
                     let bucket = self.rng.gen_range::<u32, _>(0..BUCKET_COUNT as u32 + 2);
                     let this = U256::from_le_bytes(*self.node.id().as_bytes());
