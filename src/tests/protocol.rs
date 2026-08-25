@@ -185,6 +185,35 @@ async fn get_immutable_returns_matching_blob() {
 }
 
 #[tokio::test]
+async fn get_all_honors_n_without_seed() {
+    let ids = create_node_ids(&create_secrets(0, 1));
+    let nodes = create_nodes(&ids, next_n(0), Config::default()).await;
+    let (rpc, _) = &nodes[0].1;
+    let key = Id::from([7u8; 32]);
+    for i in 0..5u8 {
+        rpc.set(key, immutable(&[i])).await.unwrap();
+    }
+
+    let all = collect_values(rpc, key, Kind::Blake3Immutable, None, None).await;
+    assert_eq!(all.len(), 5);
+
+    let limited = collect_values(rpc, key, Kind::Blake3Immutable, None, Some(nz(2))).await;
+    assert_eq!(limited.len(), 2);
+}
+
+#[tokio::test]
+async fn get_all_n_greater_than_len_does_not_panic() {
+    let ids = create_node_ids(&create_secrets(0, 1));
+    let nodes = create_nodes(&ids, next_n(0), Config::default()).await;
+    let (rpc, _) = &nodes[0].1;
+    let key = Id::from([8u8; 32]);
+    rpc.set(key, immutable(b"only")).await.unwrap();
+
+    let got = collect_values(rpc, key, Kind::Blake3Immutable, Some(nz(1)), Some(nz(100))).await;
+    assert_eq!(got.len(), 1);
+}
+
+#[tokio::test]
 async fn get_all_empty_key_ends_stream() {
     let ids = create_node_ids(&create_secrets(0, 1));
     let nodes = create_nodes(&ids, next_n(0), Config::default()).await;

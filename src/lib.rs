@@ -1680,11 +1680,17 @@ where
                 let Some(values) = self.node.storage.get_all(&msg.key, &msg.kind) else {
                     return;
                 };
+                let limit = msg
+                    .n
+                    .map(|x| (x.get() as usize).min(values.len()))
+                    .unwrap_or(values.len());
+                if limit == 0 {
+                    return;
+                }
                 // Randomize the order of the results given the provided seed
                 if let Some(seed) = msg.seed {
                     let mut rng = rand::rngs::StdRng::seed_from_u64(seed.get());
-                    let n = msg.n.map(|x| x.get()).unwrap_or(values.len() as u64) as usize;
-                    let indices = sample(&mut rng, values.len(), n);
+                    let indices = sample(&mut rng, values.len(), limit);
                     for i in indices {
                         if let Some(value) = values.get_index(i)
                             && msg.tx.send(value.clone()).await.is_err()
@@ -1693,8 +1699,7 @@ where
                         }
                     }
                 } else {
-                    // just send them in whatever order they return from the store.
-                    for value in values {
+                    for value in values.iter().take(limit) {
                         if msg.tx.send(value.clone()).await.is_err() {
                             break;
                         }
