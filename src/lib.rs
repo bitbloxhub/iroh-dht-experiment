@@ -442,6 +442,15 @@ pub mod api {
         #[rpc(tx = oneshot::Sender<()>)]
         #[wrap(CandidateLookup)]
         CandidateLookup,
+        /// Iterative lookup with pipelined `alpha` (do not wait out a whole
+        /// FindNode batch before starting the next). Sends the same final
+        /// k-closest set as [`Lookup`], after the walk finishes.
+        #[rpc(tx = mpsc::Sender<NodeId>)]
+        #[wrap(LookupStream)]
+        LookupStream {
+            initial: Option<Vec<NodeId>>,
+            id: Id,
+        },
     }
 
     #[derive(Debug, Clone)]
@@ -476,6 +485,16 @@ pub mod api {
             initial: Option<Vec<NodeId>>,
         ) -> irpc::Result<Vec<NodeId>> {
             self.0.rpc(Lookup { id, initial }).await
+        }
+
+        pub async fn lookup_stream(
+            &self,
+            id: Id,
+            initial: Option<Vec<NodeId>>,
+        ) -> irpc::Result<irpc::channel::mpsc::Receiver<NodeId>> {
+            self.0
+                .server_streaming(LookupStream { id, initial }, 32)
+                .await
         }
 
         pub async fn get_immutable(&self, hash: blake3::Hash) -> irpc::Result<Option<Vec<u8>>> {
@@ -860,7 +879,7 @@ pub mod bench_exports {
 }
 
 use crate::{
-    api::{ApiMessage, Lookup, NetworkGet, NetworkPut, WeakApiClient},
+    api::{ApiMessage, Lookup, LookupStream, NetworkGet, NetworkPut, WeakApiClient},
     pool::ClientPool,
     routing::{ALPHA, BUCKET_COUNT, Buckets, Distance, K, RoutingTable},
     rpc::{Id, Kind, RpcClient, RpcMessage, SetResponse, Value},
@@ -1539,6 +1558,14 @@ where
                 self.tasks
                     .spawn(self.state.clone().lookup(initial, msg.inner, msg.tx));
             }
+            ApiMessage::LookupStream(msg) => {
+                let initial = msg
+                    .initial
+                    .clone()
+                    .unwrap_or_else(|| self.node.routing_table.find_closest_nodes(&msg.id, K));
+                self.tasks
+                    .spawn(self.state.clone().lookup_stream(initial, msg.inner, msg.tx));
+            }
             ApiMessage::NetworkGet(msg) => {
                 // perform a network get by calling the iterative search using the closest
                 // nodes from the local routing table, then performing individual requests
@@ -1757,6 +1784,15 @@ impl<P: ClientPool> State<P> {
         tx.send(ids).await.ok();
     }
 
+    async fn lookup_stream(
+        self,
+        initial: Vec<NodeId>,
+        msg: LookupStream,
+        tx: mpsc::Sender<NodeId>,
+    ) {
+        self.iterative_find_node_stream(msg.id, initial, tx).await;
+    }
+
     async fn network_put(self, initial: Vec<NodeId>, msg: NetworkPut, tx: mpsc::Sender<NodeId>) {
         let ids = self.clone().iterative_find_node(msg.id, initial).await;
         stream::iter(ids)
@@ -1857,6 +1893,11 @@ impl<P: ClientPool> State<P> {
         Ok(ids)
     }
 
+    /// Round-based iterative lookup: start up to `alpha` FindNodes, wait until
+    /// that whole batch finishes, then decide whether to start another batch.
+    ///
+    /// Stop when no unqueried candidate is closer than the k-th successful
+    /// result (self counts as a success and is never dialed).
     async fn iterative_find_node(self, target: Id, initial: Vec<NodeId>) -> Vec<NodeId> {
         let mut candidates = initial
             .into_iter()
@@ -1922,6 +1963,96 @@ impl<P: ClientPool> State<P> {
 
         // result already has size <= k
         result.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Pipelined iterative lookup: keep up to `alpha` FindNodes in flight so a
+    /// slow peer does not block starting the next query.
+    ///
+    /// Same termination, XOR ordering, and final k-closest set as
+    /// [`Self::iterative_find_node`]. Launch rule matches a round: if the
+    /// closest unqueried id is closer than the k-th success, fill remaining
+    /// `alpha` slots with the next-closest unqueried ids even when they are
+    /// not (hedge: the improving candidate may be dead, and FindNode is the
+    /// liveness test). Only the final set is sent.
+    async fn iterative_find_node_stream(
+        self,
+        target: Id,
+        initial: Vec<NodeId>,
+        tx: mpsc::Sender<NodeId>,
+    ) {
+        let mut candidates = initial
+            .into_iter()
+            .filter(|addr| *addr != self.pool.id())
+            .map(|id| (Distance::between(&target, id.as_bytes()), id))
+            .collect::<BTreeSet<_>>();
+        let mut queried = HashSet::new();
+        let mut tasks = FuturesUnordered::new();
+        let mut result = BTreeSet::new();
+        let mut in_flight = 0usize;
+        let mut scheduled = VecDeque::new();
+        queried.insert(self.pool.id());
+        result.insert((
+            Distance::between(self.pool.id().as_bytes(), &target),
+            self.pool.id(),
+        ));
+
+        loop {
+            while in_flight < self.config.alpha {
+                if scheduled.is_empty() {
+                    let kth = result
+                        .iter()
+                        .nth(self.config.k - 1)
+                        .map(|(d, _)| *d)
+                        .unwrap_or(Distance::MAX);
+                    let improving = candidates.first().map(|(d, _)| *d < kth).unwrap_or(false);
+                    if !improving {
+                        break;
+                    }
+                    // Fill free slots from the closest unqueried ids, including
+                    // some that may be worse than kth (same hedge as a round).
+                    let n = self.config.alpha - in_flight;
+                    for _ in 0..n {
+                        if let Some(pair) = candidates.pop_first() {
+                            scheduled.push_back(pair);
+                        }
+                    }
+                }
+                let Some((dist, id)) = scheduled.pop_front() else {
+                    break;
+                };
+                queried.insert(id);
+                let fut = self.query_one(id, target);
+                tasks.push(async move { ((dist, id), fut.await) });
+                in_flight += 1;
+            }
+
+            let Some((pair @ (_, id), cands)) = tasks.next().await else {
+                break;
+            };
+            in_flight -= 1;
+
+            let Ok(cands) = cands else {
+                self.api.nodes_dead(&[id]).await.ok();
+                continue;
+            };
+            for cand in cands {
+                let dist = Distance::between(&target, cand.as_bytes());
+                if !queried.contains(&cand) {
+                    candidates.insert((dist, cand));
+                }
+            }
+            self.api.nodes_seen(&[id]).await.ok();
+            result.insert(pair);
+            while result.len() > self.config.k {
+                result.pop_last();
+            }
+        }
+
+        for (_, id) in result {
+            if tx.send(id).await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Task that sends messages to self in periodic intervals for routing

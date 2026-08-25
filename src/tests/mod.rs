@@ -1,9 +1,13 @@
 //! Test helpers shared by protocol tests and swarm visualizations.
 mod protocol;
+mod quality;
 mod slow;
 mod viz;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use iroh::{
     Endpoint, SecretKey, address_lookup::memory::MemoryLookup, endpoint::BindError,
@@ -20,34 +24,43 @@ use crate::pool::IrohPool;
 struct TestPool {
     clients: Arc<Mutex<BTreeMap<NodeId, RpcClient>>>,
     node_id: NodeId,
-    faults: NetFaults,
+    modes: NodeModes,
 }
 
-/// Per-node delay / hang injected by `TestPool::client`.
+/// How a peer behaves when someone asks `TestPool` for a client to it.
+#[derive(Clone, Copy, Debug)]
+enum NodeMode {
+    Hung,
+    Slow(Duration),
+}
+
 #[derive(Clone, Debug, Default)]
-struct NetFaults {
-    delay: Arc<Mutex<BTreeMap<NodeId, Duration>>>,
-    hang: Arc<Mutex<HashSet<NodeId>>>,
+struct NodeModes {
+    modes: Arc<Mutex<BTreeMap<NodeId, NodeMode>>>,
+    dials: Arc<AtomicUsize>,
 }
 
-impl NetFaults {
-    fn delay(&self, id: NodeId, delay: Duration) {
-        self.delay.lock().unwrap().insert(id, delay);
+impl NodeModes {
+    fn set(&self, id: NodeId, mode: NodeMode) {
+        self.modes.lock().unwrap().insert(id, mode);
     }
 
-    fn hang(&self, id: NodeId) {
-        self.hang.lock().unwrap().insert(id);
+    fn get(&self, id: NodeId) -> Option<NodeMode> {
+        self.modes.lock().unwrap().get(&id).copied()
+    }
+
+    fn dials(&self) -> usize {
+        self.dials.load(Ordering::Relaxed)
     }
 }
 
 impl ClientPool for TestPool {
     async fn client(&self, id: NodeId) -> Result<RpcClient, String> {
-        if self.faults.hang.lock().unwrap().contains(&id) {
-            std::future::pending::<()>().await;
-        }
-        let delay = self.faults.delay.lock().unwrap().get(&id).copied();
-        if let Some(delay) = delay {
-            tokio::time::sleep(delay).await;
+        self.modes.dials.fetch_add(1, Ordering::Relaxed);
+        match self.modes.get(id) {
+            Some(NodeMode::Hung) => std::future::pending::<()>().await,
+            Some(NodeMode::Slow(delay)) => tokio::time::sleep(delay).await,
+            None => {}
         }
         let client = self
             .clients
@@ -118,9 +131,9 @@ async fn create_nodes_and_clients(
     ids: &[NodeId],
     select_bootstrap: impl Fn(usize) -> Vec<usize>,
     config: Config,
-) -> (Nodes, Clients, NetFaults) {
+) -> (Nodes, Clients, NodeModes) {
     let clients = Arc::new(Mutex::new(BTreeMap::new()));
-    let faults = NetFaults::default();
+    let modes = NodeModes::default();
     let nodes = ids
         .iter()
         .enumerate()
@@ -128,7 +141,7 @@ async fn create_nodes_and_clients(
             let pool = TestPool {
                 clients: clients.clone(),
                 node_id: *id,
-                faults: faults.clone(),
+                modes: modes.clone(),
             };
             let bootstrap = apply_selection(offset, ids, &select_bootstrap(offset));
             (
@@ -141,7 +154,7 @@ async fn create_nodes_and_clients(
         .lock()
         .unwrap()
         .extend(nodes.iter().map(|(id, (rpc, _))| (*id, rpc.clone())));
-    (nodes, clients, faults)
+    (nodes, clients, modes)
 }
 
 /// Insert `ids` into every node's routing table. Full buckets still drop extras.

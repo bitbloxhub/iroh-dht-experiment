@@ -139,6 +139,25 @@ async fn lookup_with_full_tables_returns_k_closest() {
 }
 
 #[tokio::test]
+async fn lookup_stream_same_set_as_batch() {
+    let (ids, nodes) = tiny_swarm(TINY).await;
+    let (_, api) = &nodes[0].1;
+    let key = Id::blake3_hash(b"lookup-stream");
+    let mut batch = api.lookup(key, None).await.unwrap();
+    let mut rx = api.lookup_stream(key, None).await.unwrap();
+    let mut streamed = Vec::new();
+    while let Ok(Some(id)) = rx.recv().await {
+        streamed.push(id);
+    }
+    batch.sort();
+    streamed.sort();
+    assert_eq!(streamed, batch);
+    let mut expected = expected_ids(&ids, key, K);
+    expected.sort();
+    assert_eq!(streamed, expected);
+}
+
+#[tokio::test]
 async fn set_rejects_when_k_closer_nodes_are_known() {
     let (ids, nodes) = tiny_swarm(TINY).await;
     let key = Id::blake3_hash(b"placement");
