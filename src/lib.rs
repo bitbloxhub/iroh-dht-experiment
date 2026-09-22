@@ -736,6 +736,9 @@ pub mod api {
     }
 }
 pub use api::ApiClient;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 use tracing::{error, info, warn};
 
 mod routing {
